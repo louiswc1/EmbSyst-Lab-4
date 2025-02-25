@@ -1,0 +1,112 @@
+//=====[Libraries]=============================================================
+
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+//=====[Defines]===============================================================
+
+#define NUMBER_OF_KEYS 4
+#define OVER_TEMP_LEVEL 50
+#define UPDATE_INTERVAL_MS 500  // Update serial terminal every 500ms
+
+//=====[Declaration and initialization of public global objects]===============
+
+DigitalIn enterButton(BUTTON1); 
+DigitalIn mq2(PE_12);     
+DigitalIn alarmTestButton(D2);
+DigitalIn aButton(D4);
+DigitalIn bButton(D5);
+DigitalIn cButton(D6);
+DigitalIn dButton(D7);      
+
+DigitalOut alarmLed(LED1);   
+DigitalOut incorrectCodeLed(LED3);
+DigitalOut systemBlockedLed(LED2);
+
+DigitalInOut sirenPin(PE_10);   
+
+UnbufferedSerial uartUsb(USBTX, USBRX, 115200); 
+
+AnalogIn potentiometer(A0);      
+AnalogIn lm35(A1);              
+
+//=====[Declaration and initialization of public global variables]=============
+
+bool gasDetectorState = OFF;   
+float potentiometerReading = 0.0;  
+float lm35TempC = 0.0;            
+int lastUpdateTime = 0;           
+
+//=====[Function Declarations]=================================================
+
+float analogReadingScaledWithTheLM35Formula(float analogReading);  
+void sendFloat(UnbufferedSerial &uart, float value);               
+void sendMessage();                                                
+
+//=====[Main function]=========================================================
+
+int main()
+{
+    while (true) {
+        // Continuously read sensor values
+        lm35TempC = analogReadingScaledWithTheLM35Formula(lm35.read());
+        potentiometerReading = potentiometer.read();
+        gasDetectorState = !mq2; // check gas detection status
+
+        //check if the serial terminal needs updating
+        int currentTime = Kernel::Clock::now().time_since_epoch().count();
+        if (currentTime - lastUpdateTime >= UPDATE_INTERVAL_MS) {
+            // Update serial output
+            sendMessage();
+
+            //check if temperature exceeds threshold or gas is detected
+            if (lm35TempC > OVER_TEMP_LEVEL) {
+                uartUsb.write("Alarm triggered by over temp\r\n", 30);
+            } else if (gasDetectorState) {
+                uartUsb.write("Alarm triggered by gas\r\n", 24);
+            }
+
+            // Save the current time for next update
+            lastUpdateTime = currentTime;
+        }
+    }
+}
+
+//=====[Function Implementations]==============================================
+
+float analogReadingScaledWithTheLM35Formula(float analogReading)
+{
+    return (analogReading * 3.3 / 0.01); 
+}
+
+void sendFloat(UnbufferedSerial &uart, float value)
+{
+    char buffer[10];
+    int intPart = (int)value;                       
+    int decimalPart = (int)((value - intPart) * 100);
+    
+    //format the float manually 
+    buffer[0] = '0' + intPart / 10;
+    buffer[1] = '0' + intPart % 10;
+    buffer[2] = '.';
+    buffer[3] = '0' + decimalPart / 10;
+    buffer[4] = '0' + decimalPart % 10;
+    uart.write(buffer, 5);  //send formatted string
+}
+
+//send all sensor readings to serial terminal
+void sendMessage()
+{
+    uartUsb.write("The temperature is ", 20);
+    sendFloat(uartUsb, lm35TempC);   //temperature
+    uartUsb.write(" °C, potentiometer reading ", 28);
+    sendFloat(uartUsb, potentiometerReading); //potentiometer reading
+    uartUsb.write(", Gas: ", 7);
+
+    //send gas detection status
+    if (gasDetectorState) {
+        uartUsb.write("Gas detected!\r\n", 15);
+    } else {
+        uartUsb.write("No gas detected.\r\n", 18);
+    }
+}
