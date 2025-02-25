@@ -1,0 +1,216 @@
+//=====[Libraries]=============================================================
+
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+//=====[Defines]===============================================================
+
+#define NUMBER_OF_KEYS                           4
+#define BLINKING_TIME_GAS_ALARM               1000
+#define BLINKING_TIME_OVER_TEMP_ALARM          500
+#define BLINKING_TIME_GAS_AND_OVER_TEMP_ALARM  100
+#define NUMBER_OF_AVG_SAMPLES                   100
+#define OVER_TEMP_LEVEL                         50
+#define TIME_INCREMENT_MS                       10
+
+//=====[Declaration and initialization of public global objects]===============
+
+DigitalIn enterButton(BUTTON1);
+DigitalIn alarmTestButton(D2);
+DigitalIn aButton(D4);
+DigitalIn bButton(D5);
+DigitalIn cButton(D6);
+DigitalIn dButton(D7);
+DigitalIn mq2(PE_12);
+
+DigitalOut alarmLed(LED1);
+DigitalOut incorrectCodeLed(LED3);
+DigitalOut systemBlockedLed(LED2);
+
+DigitalInOut sirenPin(PE_10);
+
+UnbufferedSerial uartUsb(USBTX, USBRX, 115200);
+
+AnalogIn potentiometer(A0);
+AnalogIn lm35(A1);
+
+//=====[Declaration and initialization of public global variables]=============
+
+bool alarmState    = OFF;
+bool incorrectCode = false;
+bool overTempDetector = OFF;
+
+int numberOfIncorrectCodes = 0;
+int buttonBeingCompared    = 0;
+int codeSequence[NUMBER_OF_KEYS]   = { 1, 1, 0, 0 };
+int buttonsPressed[NUMBER_OF_KEYS] = { 0, 0, 0, 0 };
+int accumulatedTimeAlarm = 0;
+
+bool gasDetectorState          = OFF;
+bool overTempDetectorState     = OFF;
+
+float potentiometerReading = 0.0;
+float lm35TempC            = 0.0;
+
+//=====[Declarations (prototypes) of public functions]=========================
+
+void inputsInit();
+void outputsInit();
+
+void alarmActivationUpdate();
+void alarmDeactivationUpdate();
+
+void uartTask();
+void availableCommands();
+bool areEqual();
+float celsiusToFahrenheit( float tempInCelsiusDegrees );
+float analogReadingScaledWithTheLM35Formula( float analogReading );
+
+//=====[Main function, the program entry point after power on or reset]========
+
+int main()
+{
+    inputsInit();
+    outputsInit();
+
+    while (true) {
+        alarmActivationUpdate();
+        alarmDeactivationUpdate();
+        uartTask();
+        
+        // TASK 1 & 2 Continuous temperature and potentiometer readings
+        lm35TempC = analogReadingScaledWithTheLM35Formula(lm35.read());
+        potentiometerReading = potentiometer.read();
+
+        // Display on the serial terminal
+        char message[100];
+        sprintf(message, "The temperature is %.2f °C and the potentiometer reading is %.2f\r\n", lm35TempC, potentiometerReading);
+        uartUsb.write(message, strlen(message));
+
+        delay(1000); // Continuously displays it every 1 second
+    }
+}
+
+//=====[Implementations of public functions]===================================
+
+void inputsInit()
+{
+    alarmTestButton.mode(PullDown);
+    aButton.mode(PullDown);
+    bButton.mode(PullDown);
+    cButton.mode(PullDown);
+    dButton.mode(PullDown);
+    sirenPin.mode(OpenDrain);
+    sirenPin.input();
+}
+
+void outputsInit()
+{
+    alarmLed = OFF;
+    incorrectCodeLed = OFF;
+    systemBlockedLed = OFF;
+}
+
+void alarmActivationUpdate()
+{
+    lm35TempC = analogReadingScaledWithTheLM35Formula(lm35.read());
+
+    if ( lm35TempC > OVER_TEMP_LEVEL ) {
+        overTempDetector = ON;
+    } else {
+        overTempDetector = OFF;
+    }
+
+    if( !mq2) {
+        gasDetectorState = ON;
+        alarmState = ON;
+    }
+    if( overTempDetector ) {
+        overTempDetectorState = ON;
+        alarmState = ON;
+    }
+    if( alarmTestButton ) {             
+        overTempDetectorState = ON;
+        gasDetectorState = ON;
+        alarmState = ON;
+    }    
+    if( alarmState ) { 
+        alarmLed = !alarmLed;
+    } else {
+        alarmLed = OFF;
+        gasDetectorState = OFF;
+        overTempDetectorState = OFF;
+        sirenPin.input();                                  
+    }
+}
+
+void alarmDeactivationUpdate()
+{
+    if ( enterButton ) {
+        alarmState = OFF;
+    }
+}
+
+void uartTask()
+{
+    char receivedChar = '\0';
+    char str[100];
+    int stringLength;
+    if( uartUsb.readable() ) {
+        uartUsb.read( &receivedChar, 1 );
+        switch (receivedChar) {
+        case 'c':
+        case 'C':
+            sprintf ( str, "Temperature: %.2f °C\r\n", lm35TempC );
+            stringLength = strlen(str);
+            uartUsb.write( str, stringLength );
+            break;
+
+        case 'f':
+        case 'F':
+            sprintf ( str, "Temperature: %.2f °F\r\n", celsiusToFahrenheit(lm35TempC));
+            stringLength = strlen(str);
+            uartUsb.write( str, stringLength );
+            break;
+
+        case 'p':
+        case 'P':
+            sprintf ( str, "Potentiometer: %.2f\r\n", potentiometerReading );
+            stringLength = strlen(str);
+            uartUsb.write( str, stringLength );
+            break;
+
+        case 'g':
+        case 'G':
+            if ( !mq2 ) {
+                uartUsb.write( "Gas detected!\r\n", 15 );
+            } else {
+                uartUsb.write( "No gas detected.\r\n", 18 );
+            }
+            break;
+
+        default:
+            availableCommands();
+            break;
+        }
+    }
+}
+
+void availableCommands()
+{
+    uartUsb.write( "Available commands:\r\n", 21 );
+    uartUsb.write( "Press 'c' or 'C' to get temperature in Celsius\r\n", 48 );
+    uartUsb.write( "Press 'f' or 'F' to get temperature in Fahrenheit\r\n", 51 );
+    uartUsb.write( "Press 'p' or 'P' to get potentiometer value\r\n", 47 );
+    uartUsb.write( "Press 'g' or 'G' to check gas sensor status\r\n", 47 );
+}
+
+float analogReadingScaledWithTheLM35Formula( float analogReading )
+{
+    return ( analogReading * 3.3 / 0.01 );
+}
+
+float celsiusToFahrenheit( float tempInCelsiusDegrees )
+{
+    return ( tempInCelsiusDegrees * 9.0 / 5.0 + 32.0 );
+}
